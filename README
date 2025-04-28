@@ -1,0 +1,8 @@
+chrono
+======
+
+Timekeeper for your day.
+
+- Support for splits and notes.
+- Data is stored on the browser.
+- Copy data in TSV format.
