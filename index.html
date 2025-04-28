@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="icon" href="favicon.svg" />
+
+    <title>Chrono</title>
+
+    <style>
+      body {
+        background: gainsboro;
+        font-family: monospace;
+      }
+
+      main {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        max-width: 80ch;
+        margin-block: 0.5rem;
+        margin-inline: auto;
+      }
+
+      header > h1 {
+        margin-block: 1rem;
+      }
+
+      header > span::before {
+        content: "> ";
+      }
+
+      textarea {
+        padding: 0.25rem;
+      }
+
+      table {
+        border-spacing: 1rem 0;
+      }
+
+      table:not(:has(tbody)) {
+        display: none;
+      }
+
+      #log {
+        display: flex;
+        flex-direction: column;
+        row-gap: 1rem;
+      }
+
+      .split {
+        display: flex;
+        flex-wrap: wrap;
+        column-gap: 0.5rem;
+        row-gap: 0.1rem;
+        align-items: center;
+      }
+
+      .split > time:first-of-type::after {
+        content: " - ";
+      }
+
+      .split > textarea {
+        flex-grow: 1;
+        height: 1rem;
+        max-width: 60ch;
+        resize: none;
+        white-space: nowrap;
+        scrollbar-width: none;
+      }
+
+      #total {
+        align-self: end;
+        text-align: right;
+      }
+
+      #notes {
+        height: 10rem;
+        resize: vertical;
+      }
+
+      hr {
+        width: min(78ch, 95vw);
+        border-style: dashed;
+      }
+
+      @media (min-width: calc(60ch + 1rem)) {
+        .split > textarea:first-of-type {
+          flex-grow: 0;
+          width: 15ch;
+        }
+      }
+    </style>
+
+    <script src='https://cdn.jsdelivr.net/npm/temporal-polyfill/global.min.js'></script>
+  </head>
+
+  <body>
+    <main>
+      <header>
+        <h1>Chrono</h1>
+        <span>Timekeeper for your day.</span>
+      </header>
+
+      <div id="actions">
+        <button onclick="start()">Start</button>
+        <button onclick="stop()">Stop</button>
+        <button onclick="split()">Split</button>
+        <button onclick="undo()">Undo</button>
+        <button onclick="copy()">Copy</button>
+        <button ondblclick="empty()">Empty</button>
+      </div>
+
+      <div id="log"></div>
+
+      <table id="total">
+        <thead>
+          <tr>
+            <th>Tag</th>
+            <th>Total</th>
+          </tr>
+        </thead>
+      </table>
+
+      <hr/>
+
+      <textarea id="notes" placeholder="Notepad" aria-label="Notepad"></textarea>
+    </main>
+
+    <template>
+      <div class="split">
+        <time class="start"></time>
+        <time class="end"></time>
+        <textarea class="tag" placeholder="Tag" aria-label="Tag"></textarea>
+        <textarea class="description" placeholder="Description" aria-label="Description"></textarea>
+      </div>
+    </template>
+
+    <script>
+      const $ = document.querySelector.bind(document);
+      const $$ = document.querySelectorAll.bind(document);
+      const time = (info) => Temporal.PlainTime.from(info);
+      const now = () => Temporal.Now.instant().epochMilliseconds;
+      const timestamp = () => Number(localStorage.getItem('chrono.timestamp'));
+
+      let clock;
+      let interval;
+      let db;
+
+      window.onload = prepare;
+      document.onvisibilitychange = adapt;
+
+      function start() {
+        $('#total > tbody')?.remove();
+
+        interval ||= setInterval(tick, 1000);
+
+        localStorage.setItem('chrono.status', 'start');
+        localStorage.setItem('chrono.timestamp', now());
+      }
+
+      function stop() {
+        interval = clearInterval(interval);
+
+        localStorage.setItem('chrono.status', 'stop');
+        localStorage.setItem('chrono.timestamp', null);
+
+        total();
+      }
+
+      function tick() {
+        const delta = now() - timestamp();
+
+        clock = clock.add({ milliseconds: delta });
+
+        localStorage.setItem('chrono.clock', clock);
+        localStorage.setItem('chrono.timestamp', now());
+
+        sync(current());
+      }
+
+      function current() {
+        return $('.split:last-child > time.end');
+      }
+
+      function sync(element) {
+        element.dateTime = `${clock}`;
+        element.innerText = `${clock.round('seconds')}`;
+
+        save(element.parentElement);
+      }
+
+      function split() {
+        const node = $('template').content.cloneNode(true);
+
+        node.firstElementChild.id = crypto.randomUUID();
+        node.querySelectorAll('time').forEach(el => sync(el));
+
+        $('#log').appendChild(node);
+
+        listen();
+      }
+
+      function undo() {
+        const last = $('.split:last-child:not(:only-child)');
+
+        if (last) {
+          store().delete(last.id);
+          last.remove();
+        }
+
+        sync(current());
+      }
+
+      function total() {
+        $('#total > tbody')?.remove();
+
+        const tbody = document.createElement('tbody');
+
+        for (const [tag, total] of Object.entries(sum())) {
+          const tr = document.createElement('tr');
+
+          tr.innerHTML = `
+            <td>${tag}</td>
+            <td>${total}</td>
+          `;
+
+          tbody.appendChild(tr);
+        }
+
+        $('#total').appendChild(tbody);
+      }
+
+      function sum() {
+        const data = Array.from($$('.split')).map(el => encode(el));
+        const result = {}
+
+        for (const { tag, start, end } of data) {
+          const delta = time(start).until(time(end));
+
+          result[tag] = (result[tag] || time('00:00:00')).add(delta);
+        }
+
+        return result;
+      }
+
+      function empty() {
+        stop();
+
+        $('#total > tbody')?.remove();
+
+        $('#notes').value = '';
+
+        $$('.split').forEach(it => it.remove());
+
+        clock = time('00:00');
+
+        localStorage.setItem('chrono.status', null);
+
+        store().clear();
+
+        split();
+      }
+
+      function save(element) {
+        return store().put(encode(element));
+      }
+
+      function store() {
+        return db.transaction(['splits'], 'readwrite').objectStore('splits');
+      }
+
+      function encode(element) {
+        const result = { id: element.id };
+
+        Array.from(element.children).forEach(child => {
+          const key = child.className;
+          const value = (child.innerText || child.value);
+
+          result[key] = value;
+        });
+
+        return result;
+      }
+
+      function decode(data) {
+        const node = $('template').content.cloneNode(true);
+
+        node.firstElementChild.id = data.id;
+
+        node.querySelector('.start').innerText = data.start;
+        node.querySelector('.end').innerText = data.end;
+        node.querySelector('.tag').value = data.tag;
+        node.querySelector('.description').value = data.description;
+
+        $('#log').appendChild(node);
+
+        listen();
+      }
+
+      function listen() {
+        $('#log > :last-child').addEventListener('input', (event) => {
+          save(event.target.parentElement);
+        });
+      }
+
+      function prepare() {
+        const request = indexedDB.open('chrono', 1);
+
+        request.onupgradeneeded = schema;
+        request.onsuccess = init;
+        request.onerror = console.error;
+      }
+
+      function schema(event) {
+        event.target.result.createObjectStore('splits', { keyPath: 'id' })
+      }
+
+      function init(event) {
+        db = event.target.result;
+
+        $('#notes').addEventListener('input', (event) => {
+          localStorage.setItem('chrono.notes', event.target.value);
+        });
+
+        load();
+      }
+
+      function load() {
+        $('#notes').value = localStorage.getItem('chrono.notes');
+
+        clock = time(localStorage.getItem('chrono.clock') || '00:00:00');
+
+        store().getAll().onsuccess = (event) => {
+          const data = event.target.result.sort((a, b) =>
+            Temporal.PlainTime.compare(time(a.start), time(b.start))
+          );
+
+          if (data.length == 0) {
+            split();
+            return;
+          }
+
+          for (const entry of data) {
+            decode(entry);
+          }
+
+          restart();
+        }
+      }
+
+      function copy() {
+        const today = `${Temporal.Now.plainDateISO()}`;
+
+        store().getAll().onsuccess = async (event) => {
+          const data = event.target.result.sort((a, b) =>
+            Temporal.PlainTime.compare(time(a.start), time(b.start))
+          );
+
+          const csv = data
+            .map(row => { row['id'] = today; return row })
+            .map(row => Object.values(row).join('\t'))
+            .join('\n')
+
+          await navigator.clipboard.writeText(csv);
+        }
+      }
+
+      function adapt() {
+        if (document.hidden) {
+          interval = clearInterval(interval);
+        } else {
+          restart();
+        }
+      }
+
+      function restart() {
+        if (localStorage.getItem('chrono.status') == 'start') {
+          tick();
+          start();
+        }
+
+        if (localStorage.getItem('chrono.status') == 'stop') {
+          stop();
+        }
+      }
+    </script>
+  </body>
+</html>
